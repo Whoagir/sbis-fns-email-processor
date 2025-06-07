@@ -37,11 +37,16 @@ class SBISClient:
 
         try:
             async with self.session.post(self.auth_url, json=auth_data) as response:
+                self.logger.info(f"Запрос авторизации отправлен на {self.auth_url}")
+                self.logger.info(f"Статус ответа: {response.status}")
                 if response.status != 200:
+                    error_text = await response.text()
                     self.logger.error(f"HTTP ошибка авторизации: {response.status}")
+                    self.logger.error(f"HTTP ошибка авторизации: {response.status}, текст: {error_text}")
                     return False
 
                 result = await response.json()
+                self.logger.info(f"Ответ API: {result}")
 
                 if 'error' in result:
                     self.logger.error(f"Ошибка авторизации: {result['error']}")

@@ -1,27 +1,152 @@
-version: '3.8'
-
 services:
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-
+  # PostgreSQL база данных
   postgres:
     image: postgres:15-alpine
-    environment:
-      POSTGRES_DB: fns_checker
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: 12345
-    ports:
-      - "5432:5432"
+    container_name: sbis_postgres
+    env_file:
+      - .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-fns_checker}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sbis_network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+
+  # Redis для Celery
+  redis:
+    image: redis:7-alpine
+    container_name: sbis_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sbis_network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+
+  # FastAPI приложение
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sbis_api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
+    networks:
+      - sbis_network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        python scripts/init_db.py &&
+        echo 'Starting FastAPI server...' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+      "
+
+  # Celery Worker
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sbis_celery_worker
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - sbis_network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: celery -A app.tasks.celery_tasks worker --loglevel=info --concurrency=2
+
+  # Celery Beat (планировщик)
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sbis_celery_beat
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+      - celery_beat_data:/app/celerybeat-schedule
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - sbis_network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: celery -A app.tasks.celery_tasks beat --loglevel=info
+
+  # Flower для мониторинга Celery (опционально)
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sbis_flower
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - sbis_network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: celery -A app.tasks.celery_tasks flower --port=5555
 
 volumes:
-  redis_data:
   postgres_data:
+  redis_data:
+  celery_beat_data:
+
+networks:
+  sbis_network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1400"

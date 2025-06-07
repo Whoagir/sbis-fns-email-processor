@@ -15,6 +15,7 @@ from app.database import SessionLocal
 from app.services.sbis_client import SBISClient
 from app.services.fns_filter import FNSFilter
 from app.utils.logger import get_logger
+from app.models.models import MailDocument, ProcessingLog
 
 logger = get_logger(__name__)
 
@@ -59,6 +60,7 @@ celery_app.conf.task_routes = {
     'app.tasks.celery_tasks.check_fns_mails': {'queue': 'celery'},
     'app.tasks.celery_tasks.check_fns_documents': {'queue': 'celery'},
     'app.tasks.celery_tasks.get_fns_documents_manual': {'queue': 'celery'},
+    'app.tasks.celery_tasks.check_all_documents_task': {'queue': 'celery'},
     'app.tasks.celery_tasks.test_task': {'queue': 'celery'},
 }
 
@@ -244,6 +246,165 @@ def get_fns_documents_manual(self, days: int = 7):
     except Exception as e:
         logger.error(f"Ошибка в задаче get_fns_documents_manual: {str(e)}")
         return {"status": "error", "message": f"Ошибка: {str(e)}"}
+    finally:
+        if db:
+            db.close()
+
+
+# Добавь эту задачу в celery_tasks.py
+
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 60})
+def check_all_documents_task(self, days_back: int = 3650):
+    """
+    Celery задача для полной проверки всех документов за указанный период
+
+    Args:
+        days_back: Количество дней назад для проверки (по умолчанию 10 лет)
+    """
+    logger.info(f"🚀 Celery: Запуск полной проверки за {days_back} дней")
+
+    db = None
+    task_id = self.request.id
+
+    try:
+        from app.models.models import MailDocument, ProcessingLog
+
+        # Получаем сессию БД
+        db = get_database_session()
+
+        # Создаем лог
+        log_entry = ProcessingLog(
+            task_id=task_id,
+            status="processing"
+        )
+        db.add(log_entry)
+        db.commit()
+
+        # Обновляем статус задачи
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Подключение к СБИС...', 'progress': 10}
+        )
+
+        # Внутренняя асинхронная функция
+        async def get_all_fns_docs():
+            async with SBISClient() as sbis_client:
+                if not await sbis_client.authenticate():
+                    logger.error("Не удалось авторизоваться в СБИС")
+                    return None
+
+                # Обновляем статус
+                self.update_state(
+                    state='PROGRESS',
+                    meta={'status': 'Получение документов из СБИС...', 'progress': 30}
+                )
+
+                return await sbis_client.get_fns_documents(days_back=days_back)
+
+        # Запускаем асинхронную функцию
+        fns_documents = asyncio.run(get_all_fns_docs())
+
+        if fns_documents is None:
+            log_entry.status = "error"
+            log_entry.error_message = "Ошибка авторизации в СБИС"
+            db.commit()
+            return {"status": "error", "message": "Ошибка авторизации в СБИС"}
+
+        # Обновляем статус
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Сохранение в базу данных...', 'progress': 60}
+        )
+
+        # Сохраняем документы
+        new_documents_count = 0
+        total_processed = 0
+
+        for i, doc in enumerate(fns_documents):
+            # Обновляем прогресс каждые 100 документов
+            if i % 100 == 0:
+                progress = 60 + (i / len(fns_documents)) * 30  # от 60% до 90%
+                self.update_state(
+                    state='PROGRESS',
+                    meta={
+                        'status': f'Обработано {i}/{len(fns_documents)} документов...',
+                        'progress': int(progress)
+                    }
+                )
+
+            existing_doc = db.query(MailDocument).filter(
+                MailDocument.external_id == doc.get('external_id', '')
+            ).first()
+
+            if not existing_doc:
+                mail_doc = MailDocument(
+                    external_id=doc.get('external_id', ''),
+                    date=doc.get('date', datetime.now()),
+                    subject=doc.get('subject', ''),
+                    sender_inn=doc.get('sender_inn', ''),
+                    sender_name=doc.get('sender_name', ''),
+                    filename=doc.get('filename', ''),
+                    has_attachment=doc.get('has_attachment', False),
+                    is_from_fns=True
+                )
+                db.add(mail_doc)
+                new_documents_count += 1
+
+            total_processed += 1
+
+            # Коммитим каждые 500 документов для избежания блокировок
+            if total_processed % 500 == 0:
+                db.commit()
+
+        # Финальный коммит
+        db.commit()
+
+        # Обновляем лог
+        log_entry.status = "success"
+        log_entry.total_documents = len(fns_documents)
+        log_entry.fns_documents = len(fns_documents)
+        db.commit()
+
+        # Финальный статус
+        self.update_state(
+            state='SUCCESS',
+            meta={'status': 'Завершено успешно!', 'progress': 100}
+        )
+
+        logger.info(
+            f"✅ Celery: Полная проверка завершена. Обработано {len(fns_documents)} документов, новых: {new_documents_count}")
+
+        return {
+            "status": "success",
+            "total_documents": len(fns_documents),
+            "new_documents": new_documents_count,
+            "days_back": days_back,
+            "task_id": task_id,
+            "processed_at": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Celery: Ошибка полной проверки: {str(e)}")
+
+        if db:
+            db.rollback()
+            try:
+                log_entry = db.query(ProcessingLog).filter(ProcessingLog.task_id == task_id).first()
+                if log_entry:
+                    log_entry.status = "error"
+                    log_entry.error_message = str(e)
+                    db.commit()
+            except:
+                pass
+
+        # Обновляем статус ошибки
+        self.update_state(
+            state='FAILURE',
+            meta={'status': f'Ошибка: {str(e)}', 'progress': 100}
+        )
+
+        raise self.retry(exc=e)
+
     finally:
         if db:
             db.close()

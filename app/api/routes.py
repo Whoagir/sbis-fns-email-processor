@@ -148,6 +148,130 @@ def get_processing_logs(
 # СИСТЕМНЫЕ ЭНДПОИНТЫ
 # ===============================
 
+@router.post("/check-all")
+async def check_all_documents(db: Session = Depends(get_db)):
+    """
+    Полная проверка всех документов за последние 10 лет
+
+    Этот эндпоинт:
+    - Получает ВСЕ документы за последние 10 лет из СБИС
+    - Фильтрует документы от ФНС
+    - Сохраняет их в базу данных
+    - Возвращает подробную статистику
+    """
+    try:
+        logger.info("🚀 Запуск полной проверки документов за 10 лет")
+        start_time = datetime.now()
+
+        # 10 лет = примерно 3650 дней
+        days_back = 3650
+
+        # Сначала пробуем через Celery (если доступен)
+        try:
+            from app.tasks.celery_tasks import check_all_documents_task
+            task = check_all_documents_task.delay(days_back)
+            result = task.get(timeout=300)  # 5 минут таймаут
+            logger.info("✅ Задача выполнена через Celery")
+        except Exception as celery_error:
+            logger.warning(f"⚠️ Celery недоступен: {celery_error}, выполняем напрямую")
+            result = await run_full_check(db, days_back)
+
+        # Обновляем глобальное состояние
+        global last_check_time, processed_documents_count
+        last_check_time = datetime.now()
+        processed_documents_count += result.get('fns_documents', 0)
+
+        # Считаем время выполнения
+        execution_time = (datetime.now() - start_time).total_seconds()
+
+        return {
+            "status": "success",
+            "message": "Полная проверка за 10 лет завершена",
+            "period": "10 лет (3650 дней)",
+            "execution_time_seconds": round(execution_time, 2),
+            "result": {
+                "total_documents_found": result.get('total_documents', 0),
+                "fns_documents_found": result.get('fns_documents', 0),
+                "new_documents_saved": result.get('new_documents', 0),
+                "duplicates_skipped": result.get('total_documents', 0) - result.get('new_documents', 0)
+            },
+            "statistics": await get_database_statistics(db),
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка полной проверки документов: {str(e)}")
+        return {
+            "status": "error",
+            "message": "Ошибка при выполнении полной проверки",
+            "error_details": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+# Добавь эту вспомогательную функцию в routes.py
+async def run_full_check(db: Session, days_back: int):
+    """Выполнение полной проверки документов за указанный период"""
+    try:
+        logger.info(f"🔍 Начинаем полную проверку за {days_back} дней")
+
+        result = await fns_service.get_and_process_fns_documents(db, days_back)
+
+        # Сохраняем лог обработки
+        log_entry = ProcessingLog(
+            task_id=f"full_check_{days_back}_days",
+            total_documents=result["total_documents"],
+            fns_documents=result["fns_documents"],
+            status="success" if "error" not in result else "error"
+        )
+        db.add(log_entry)
+        db.commit()
+
+        logger.info(f"✅ Полная проверка завершена: {result}")
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка полной проверки: {e}")
+        raise HTTPException(status_code=500, detail=f"Full check failed: {e}")
+
+
+async def get_database_statistics(db: Session) -> Dict[str, Any]:
+    """Получение статистики из базы данных"""
+    try:
+        # Общая статистика
+        total_docs = db.query(MailDocument).count()
+        fns_docs = db.query(MailDocument).filter(MailDocument.is_from_fns == True).count()
+
+        # Статистика по периодам
+        now = datetime.now()
+        last_30_days = db.query(MailDocument).filter(
+            MailDocument.date >= now - timedelta(days=30)
+        ).count()
+
+        last_year = db.query(MailDocument).filter(
+            MailDocument.date >= now - timedelta(days=365)
+        ).count()
+
+        # Статистика по ФНС документам
+        fns_last_30_days = db.query(MailDocument).filter(
+            MailDocument.is_from_fns == True,
+            MailDocument.date >= now - timedelta(days=30)
+        ).count()
+
+        return {
+            "total_documents": total_docs,
+            "fns_documents": fns_docs,
+            "regular_documents": total_docs - fns_docs,
+            "last_30_days": last_30_days,
+            "last_year": last_year,
+            "fns_last_30_days": fns_last_30_days,
+            "fns_percentage": round((fns_docs / total_docs * 100) if total_docs > 0 else 0, 2)
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики: {e}")
+        return {"error": str(e)}
+
 @router.get("/status")
 async def get_system_status(db: Session = Depends(get_db)):
     """Получение статуса системы и статистики"""
@@ -222,6 +346,8 @@ async def test_sbis_connection():
             "message": f"Ошибка подключения к СБИС: {str(e)}",
             "timestamp": datetime.now().isoformat()
         }
+
+
 
 
 # ===============================
