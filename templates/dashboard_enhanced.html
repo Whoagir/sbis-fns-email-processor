@@ -1,38 +1,80 @@
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
-    <title>FNS Documents Monitor</title>
-    <meta charset="utf-8">
-    <!-- ИСПРАВЛЕНО: правильный путь к CSS -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Мониторинг документов ФНС</title>
     <link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
     <div class="container">
-        <div class="header">
-            <h1>📊 Мониторинг документов ФНС</h1>
+        <header>
+            <h1>Мониторинг документов ФНС</h1>
             <p>Система получения и обработки документов от налоговых органов через API СБИС</p>
-        </div>
+        </header>
 
-        <div class="card">
-            <h2>🎛️ Управление</h2>
-            <button class="btn" onclick="checkStatus()">Проверить статус</button>
-            <button class="btn btn-success" onclick="checkNow()">Проверить сейчас</button>
-            <button class="btn" onclick="getDocuments()">Получить документы ФНС</button>
-            <div class="loading" id="loading">⏳ Загрузка...</div>
-        </div>
+        <div class="grid">
+            <!-- Статус системы -->
+            <div class="card">
+                <h2>Статус системы</h2>
+                <div id="status-content">
+                    <div class="loading">Загрузка...</div>
+                </div>
+                <button id="update-status-btn">Обновить статус</button>
+            </div>
 
-        <div class="card">
-            <h2>📈 Статус системы</h2>
-            <div id="status-info">Нажмите "Проверить статус" для получения информации</div>
-        </div>
+            <!-- Проверка подключения СБИС -->
+            <div class="card">
+                <h2>Проверка подключения СБИС</h2>
+                <div id="sbis-content">
+                    <div class="status-item">
+                        <span>Статус:</span>
+                        <span id="sbis-status">Не проверено</span>
+                    </div>
+                </div>
+                <button id="test-sbis-btn">Проверить подключение</button>
+            </div>
 
-        <div class="card">
-            <h2>📋 Документы от ФНС</h2>
-            <div id="results">Результаты будут отображены здесь</div>
+            <!-- Проверка новых документов -->
+            <div class="card">
+                <h2>Проверка новых документов</h2>
+                <div id="check-content">
+                    <div class="status-item">
+                        <span>Последняя проверка:</span>
+                        <span id="last-check">Не выполнялась</span>
+                    </div>
+                </div>
+                <button id="check-now-btn">Проверить новые документы</button>
+            </div>
+
+            <!-- Получение документов -->
+            <div class="card full-width">
+                <h2>Получение документов</h2>
+                <div class="form-group">
+                    <label for="days-back">Период (дней назад):</label>
+                    <input type="number" id="days-back" value="180" min="1" max="3650">
+
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="fns-only">
+                        Только документы от ФНС
+                    </label>
+
+                    <button id="get-documents-btn">Получить документы</button>
+                </div>
+
+                <div id="documents-content">
+                    <div class="documents-stats">
+                        <div class="stat-item">
+                            <span>Найдено документов:</span>
+                            <span id="docs-count">0</span>
+                        </div>
+                    </div>
+                    <div id="documents-list"></div>
+                </div>
+            </div>
         </div>
     </div>
 
-    <!-- ИСПРАВЛЕНО: правильный путь к JS -->
     <script src="/static/dashboard.js"></script>
 </body>
 </html>

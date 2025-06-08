@@ -89,6 +89,9 @@ Pipfile.lock
 # poetry
 poetry.lock
 
+# Reports
+reports/
+*.json
 
 #pdm.lock
 .pdm.toml

@@ -13,16 +13,17 @@ from fastapi.templating import Jinja2Templates
 from datetime import datetime, timedelta
 import asyncio
 from app.config import settings
+from app.services.json_report_service import json_report_service
+from fastapi.responses import FileResponse
+import os
 
 templates = Jinja2Templates(directory="templates")
 router = APIRouter()
 
-# Глобальные переменные для хранения состояния
 last_check_time = None
 processed_documents_count = 0
 
 
-# Утилиты
 async def run_real_check(db: Session):
     """Выполнение реальной проверки документов через СБИС"""
     try:
@@ -88,8 +89,10 @@ def get_documents(
     query = db.query(MailDocument)
 
     # Фильтр по ФНС
-    if fns_only:
+    if fns_only is True:
         query = query.filter(MailDocument.is_from_fns == True)
+    elif fns_only is False:
+        query = query.filter(MailDocument.is_from_fns == False)
 
     # Фильтр по дате
     if days_back:
@@ -97,6 +100,10 @@ def get_documents(
         query = query.filter(MailDocument.date >= start_date)
 
     documents = query.order_by(MailDocument.date.desc()).offset(skip).limit(limit).all()
+    logger.info(f"Запрос документов: fns_only={fns_only}, найдено={len(documents)}")
+    if documents:
+        fns_count = sum(1 for doc in documents if doc.is_from_fns)
+        logger.info(f"Из них от ФНС: {fns_count}")
     return documents
 
 
@@ -163,7 +170,6 @@ async def check_all_documents(db: Session = Depends(get_db)):
         logger.info("🚀 Запуск полной проверки документов за 10 лет")
         start_time = datetime.now()
 
-        # 10 лет = примерно 3650 дней
         days_back = 3650
 
         # Сначала пробуем через Celery (если доступен)
@@ -171,9 +177,9 @@ async def check_all_documents(db: Session = Depends(get_db)):
             from app.tasks.celery_tasks import check_all_documents_task
             task = check_all_documents_task.delay(days_back)
             result = task.get(timeout=300)  # 5 минут таймаут
-            logger.info("✅ Задача выполнена через Celery")
+            logger.info("Задача выполнена через Celery")
         except Exception as celery_error:
-            logger.warning(f"⚠️ Celery недоступен: {celery_error}, выполняем напрямую")
+            logger.warning(f"Celery недоступен: {celery_error}, выполняем напрямую")
             result = await run_full_check(db, days_back)
 
         # Обновляем глобальное состояние
@@ -209,7 +215,6 @@ async def check_all_documents(db: Session = Depends(get_db)):
         }
 
 
-# Добавь эту вспомогательную функцию в routes.py
 async def run_full_check(db: Session, days_back: int):
     """Выполнение полной проверки документов за указанный период"""
     try:
@@ -227,11 +232,11 @@ async def run_full_check(db: Session, days_back: int):
         db.add(log_entry)
         db.commit()
 
-        logger.info(f"✅ Полная проверка завершена: {result}")
+        logger.info(f"Полная проверка завершена: {result}")
         return result
 
     except Exception as e:
-        logger.error(f"❌ Ошибка полной проверки: {e}")
+        logger.error(f"Ошибка полной проверки: {e}")
         raise HTTPException(status_code=500, detail=f"Full check failed: {e}")
 
 
@@ -348,16 +353,185 @@ async def test_sbis_connection():
         }
 
 
+# ===============================
+# JSON ОТЧЕТЫ
+# ===============================
+
+@router.post("/generate-report")
+async def generate_json_report(
+        fns_only: bool = False,
+        days_back: Optional[int] = None,
+        filename: Optional[str] = None,
+        db: Session = Depends(get_db)
+):
+    """
+    Генерирует JSON отчет по документам с теми же фильтрами что и /documents/
+
+    - **fns_only**: только документы от ФНС
+    - **days_back**: документы за последние N дней
+    - **filename**: имя файла для сохранения (опционально)
+    """
+    try:
+        # Используем ту же логику фильтрации что и в get_documents
+        query = db.query(MailDocument)
+
+        # Фильтр по ФНС
+        if fns_only is True:
+            query = query.filter(MailDocument.is_from_fns == True)
+        elif fns_only is False:
+            query = query.filter(MailDocument.is_from_fns == False)
+
+        # Фильтр по дате
+        period_description = "all_time"
+        if days_back:
+            start_date = datetime.now() - timedelta(days=days_back)
+            query = query.filter(MailDocument.date >= start_date)
+            period_description = f"last_{days_back}_days"
+
+        # Получаем документы
+        documents = query.order_by(MailDocument.date.desc()).all()
+
+        # Уточняем описание периода
+        if fns_only:
+            period_description += "_fns_only"
+
+        # Генерируем отчет
+        result = json_report_service.generate_report(
+            documents=documents,
+            period_description=period_description,
+            filename=filename
+        )
+
+        logger.info(f"📊 Сгенерирован JSON отчет: {len(documents)} документов")
+
+        return {
+            "status": "success",
+            "message": f"JSON отчет успешно создан",
+            "summary": result["report_data"]["summary"],
+            "file_info": result["file_info"],
+            "filters_applied": {
+                "fns_only": fns_only,
+                "days_back": days_back
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка генерации JSON отчета: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка генерации отчета: {str(e)}")
+
+
+@router.get("/reports")
+async def get_reports_list():
+    """Получить список всех сохраненных JSON отчетов"""
+    try:
+        reports = json_report_service.get_reports_list()
+
+        return {
+            "status": "success",
+            "reports_count": len(reports),
+            "reports": reports,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения списка отчетов: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка получения отчетов: {str(e)}")
+
+
+@router.get("/reports/{filename}")
+async def download_report(filename: str):
+    """Скачать JSON отчет по имени файла"""
+    try:
+        filepath = os.path.join(json_report_service.reports_dir, filename)
+
+        if not os.path.exists(filepath):
+            raise HTTPException(status_code=404, detail="Файл отчета не найден")
+
+        if not filename.endswith('.json'):
+            raise HTTPException(status_code=400, detail="Неверный формат файла")
+
+        return FileResponse(
+            path=filepath,
+            filename=filename,
+            media_type='application/json'
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Ошибка скачивания отчета: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка скачивания: {str(e)}")
 
 
 # ===============================
-# УТИЛИТЫ И ДОПОЛНИТЕЛЬНЫЕ
+# ДАШБОРД (ЗАМЕНЯЕМ НА JSON API)
 # ===============================
 
-@router.get("/dashboard", response_class=HTMLResponse)
-async def enhanced_dashboard(request: Request):
-    """Веб-дашборд для управления системой"""
-    return templates.TemplateResponse(
-        "dashboard_enhanced.html",
-        {"request": request}
-    )
+@router.get("/dashboard")
+async def dashboard_api(db: Session = Depends(get_db)):
+    """
+    API дашборда - возвращает JSON с полной информацией о системе
+    (заменяет HTML дашборд)
+    """
+    try:
+        # Получаем системную статистику
+        system_status = await get_system_status(db)
+
+        # Получаем список отчетов
+        reports_info = json_report_service.get_reports_list()
+
+        # Получаем статистику по документам за разные периоды
+        now = datetime.now()
+
+        # За последние 30 дней
+        last_30_days = db.query(MailDocument).filter(
+            MailDocument.date >= now - timedelta(days=30)
+        ).all()
+
+        # За последние 7 дней
+        last_7_days = db.query(MailDocument).filter(
+            MailDocument.date >= now - timedelta(days=7)
+        ).all()
+
+        # Только ФНС за последние 30 дней
+        fns_last_30_days = db.query(MailDocument).filter(
+            MailDocument.is_from_fns == True,
+            MailDocument.date >= now - timedelta(days=30)
+        ).all()
+
+        return {
+            "status": "success",
+            "dashboard_data": {
+                "system_status": system_status,
+                "reports": {
+                    "total_reports": len(reports_info),
+                    "recent_reports": reports_info[:5],  # Последние 5 отчетов
+                    "all_reports": reports_info
+                },
+                "quick_stats": {
+                    "last_30_days": {
+                        "total": len(last_30_days),
+                        "fns": len(fns_last_30_days),
+                        "regular": len(last_30_days) - len(fns_last_30_days)
+                    },
+                    "last_7_days": {
+                        "total": len(last_7_days),
+                        "fns": sum(1 for doc in last_7_days if doc.is_from_fns),
+                        "regular": sum(1 for doc in last_7_days if not doc.is_from_fns)
+                    }
+                },
+                "available_actions": {
+                    "generate_report": "/api/v1/generate-report",
+                    "check_documents": "/api/v1/check-now",
+                    "test_sbis": "/api/v1/test-sbis",
+                    "view_documents": "/api/v1/documents/",
+                    "download_reports": "/api/v1/reports/{filename}"
+                }
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка API дашборда: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка дашборда: {str(e)}")

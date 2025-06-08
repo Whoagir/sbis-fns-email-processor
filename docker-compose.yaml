@@ -1,5 +1,4 @@
 services:
-  # PostgreSQL база данных
   postgres:
     image: postgres:15-alpine
     container_name: sbis_postgres
@@ -20,7 +19,7 @@ services:
       - 8.8.8.8
       - 8.8.4.4
 
-  # Redis для Celery
+
   redis:
     image: redis:7-alpine
     container_name: sbis_redis
@@ -39,7 +38,7 @@ services:
       - 8.8.8.8
       - 8.8.4.4
 
-  # FastAPI приложение
+
   api:
     build:
       context: .
@@ -71,7 +70,7 @@ services:
         uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
       "
 
-  # Celery Worker
+
   celery-worker:
     build:
       context: .
@@ -95,7 +94,7 @@ services:
       - 8.8.4.4
     command: celery -A app.tasks.celery_tasks worker --loglevel=info --concurrency=2
 
-  # Celery Beat (планировщик)
+
   celery-beat:
     build:
       context: .
@@ -120,7 +119,7 @@ services:
       - 8.8.4.4
     command: celery -A app.tasks.celery_tasks beat --loglevel=info
 
-  # Flower для мониторинга Celery (опционально)
+
   flower:
     build:
       context: .

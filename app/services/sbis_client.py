@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import logging
 from typing import List, Dict, Any, Optional
 from app.config import settings
+from app.services.common import DocumentProcessor
 
 
 class SBISClient:
@@ -27,7 +28,7 @@ class SBISClient:
             await self.session.close()
 
     async def authenticate(self) -> bool:
-        """Авторизация в СБИС - точно как в рабочем примере"""
+        """Авторизация в СБИС"""
         auth_data = {
             "jsonrpc": "2.0",
             "method": "СБИС.Аутентифицировать",
@@ -54,7 +55,7 @@ class SBISClient:
 
                 self.session_id = result.get('result')
                 if self.session_id:
-                    self.logger.info(f"✅ Сессия: {self.session_id[:10]}...")
+                    self.logger.info(f"Сессия: {self.session_id[:10]}...")
                     return True
 
                 return False
@@ -64,12 +65,11 @@ class SBISClient:
             return False
 
     async def get_documents_raw(self, days_back: int = 7) -> dict:
-        """Получение сырых данных документов - как в рабочем примере"""
+        """Получение сырых данных документов БЕЗ пагинации (как в рабочем коде)"""
         if not self.session_id:
             if not await self.authenticate():
                 return {}
 
-        # Точно как в рабочем примере
         date_to = datetime.now().strftime("%d.%m.%Y")
         date_from = (datetime.now() - timedelta(days=days_back)).strftime("%d.%m.%Y")
 
@@ -104,7 +104,7 @@ class SBISClient:
             return {}
 
     def parse_documents(self, raw_result: dict) -> List[Dict[str, Any]]:
-        """Парсинг документов из сырого ответа - точно как в рабочем примере"""
+        """Парсинг документов из сырого ответа"""
         documents = []
 
         if not raw_result or 'result' not in raw_result:
@@ -123,7 +123,7 @@ class SBISClient:
             if not document:
                 continue
 
-            # Извлекаем ИНН контрагента - точно как в рабочем примере
+            # Извлекаем ИНН контрагента
             kontragent = document.get("Контрагент", {})
             inn = None
             if "СвЮЛ" in kontragent and "ИНН" in kontragent["СвЮЛ"]:
@@ -139,10 +139,14 @@ class SBISClient:
                     if isinstance(att, dict) and "Название" in att:
                         attachment_names.append(att["Название"])
 
+            # Парсим дату с помощью общего метода
+            date_str = document.get("Дата", "")
+            parsed_date = DocumentProcessor.parse_date(date_str)
+
             # Формируем структуру документа
             parsed_doc = {
                 "external_id": f"{document.get('Дата', '')}_{document.get('Название', '')}_{inn or 'no_inn'}",
-                "date": document.get("Дата", ""),
+                "date": parsed_date,
                 "subject": document.get("Название", ""),
                 "sender_inn": inn,
                 "sender_name": kontragent.get("Название", ""),
@@ -156,29 +160,24 @@ class SBISClient:
         self.logger.info(f"Распарсено документов: {len(documents)}")
         return documents
 
-    def filter_fns_documents(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Фильтрация документов от ФНС - точно как в рабочем примере"""
-        fns_documents = []
-
-        for doc in documents:
-            inn = doc.get("sender_inn", "")
-            title = doc.get("subject", "").lower()
-
-            # Проверка по ИНН - точно как в рабочем примере
-            is_fns_by_inn = inn and inn.startswith("77")
-
-            # Проверка по ключевым словам - точно как в рабочем примере
-            keywords = ["фнс", "налоговая", "сверка", "требование"]
-            is_fns_by_keywords = any(keyword in title for keyword in keywords)
-
-            if is_fns_by_inn or is_fns_by_keywords:
-                fns_documents.append(doc)
-
-        self.logger.info(f"Найдено документов от ФНС: {len(fns_documents)}")
-        return fns_documents
-
     async def get_fns_documents(self, days_back: int = 7) -> List[Dict[str, Any]]:
-        """Получение документов от ФНС - главный метод"""
+        """Получение документов от ФНС"""
+        try:
+            # Получаем все документы
+            all_documents = await self.get_all_documents(days_back)
+            if not all_documents:
+                return []
+
+            # Фильтруем документы от ФНС с помощью общего класса
+            fns_documents = DocumentProcessor.filter_fns_documents(all_documents)
+            return fns_documents
+
+        except Exception as e:
+            self.logger.error(f"Ошибка получения документов ФНС: {str(e)}")
+            return []
+
+    async def get_all_documents(self, days_back: int = 7) -> List[Dict[str, Any]]:
+        """Получение ВСЕХ документов (без пагинации, как в рабочем коде)"""
         try:
             # Получаем сырые данные
             raw_result = await self.get_documents_raw(days_back)
@@ -186,29 +185,23 @@ class SBISClient:
                 return []
 
             # Парсим документы
-            all_documents = self.parse_documents(raw_result)
-            if not all_documents:
-                return []
-
-            # Фильтруем документы от ФНС
-            fns_documents = self.filter_fns_documents(all_documents)
-
-            return fns_documents
+            documents = self.parse_documents(raw_result)
+            return documents
 
         except Exception as e:
-            self.logger.error(f"Ошибка получения документов ФНС: {str(e)}")
+            self.logger.error(f"Ошибка получения всех документов: {str(e)}")
             return []
 
 
 # Простая функция для тестирования
 async def test_sbis_integration():
     """Тест интеграции"""
-    print("🔍 Тестируем интеграцию СБИС...")
+    print("Тестируем интеграцию СБИС...")
 
     async with SBISClient() as client:
         # Тест авторизации
         auth_success = await client.authenticate()
-        print(f"Авторизация: {'✅ Успешно' if auth_success else '❌ Ошибка'}")
+        print(f"Авторизация: {'Успешно' if auth_success else 'Ошибка'}")
 
         if not auth_success:
             return
@@ -216,6 +209,10 @@ async def test_sbis_integration():
         # Тест получения документов
         fns_docs = await client.get_fns_documents(days_back=3600)  # Большой период для теста
         print(f"Найдено документов от ФНС: {len(fns_docs)}")
+
+        # Тест получения документов
+        all_docs = await client.get_all_documents(days_back=3600)  # Большой период для теста
+        print(f"Найдено всех документов: {len(all_docs)}")
 
         # Показываем первые 3 документа
         for i, doc in enumerate(fns_docs[:3]):

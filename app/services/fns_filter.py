@@ -5,7 +5,7 @@ from app.models.models import MailDocument
 from app.schemas.schemas import MailDocumentCreate
 from app.config import settings
 from app.utils.logger import logger
-from app.services.sbis_client import SBISClient
+from app.services.common import DocumentProcessor
 
 
 class FNSFilterService:
@@ -17,46 +17,21 @@ class FNSFilterService:
 
     @staticmethod
     def is_from_fns(document_data: Dict[str, Any]) -> bool:
-        """Проверка, является ли документ от ФНС"""
-        # Проверка по ИНН отправителя
-        sender_inn = document_data.get('sender_inn', '')
-        if sender_inn:
-            for prefix in settings.FNS_INN_PREFIXES:
-                if sender_inn.startswith(prefix):
-                    logger.debug(f"Document matches FNS INN prefix: {prefix}")
-                    return True
-
-        # Проверка по ключевым словам в теме
-        subject = document_data.get('subject', '').lower()
-        for keyword in settings.FNS_KEYWORDS:
-            if keyword.lower() in subject:
-                logger.debug(f"Document matches FNS keyword: {keyword}")
-                return True
-
-        return False
+        """Проверка, является ли документ от ФНС (делегируем в общий класс)"""
+        return DocumentProcessor.is_from_fns(document_data)
 
     @staticmethod
     def convert_to_schema(document_data: Dict[str, Any]) -> MailDocumentCreate:
         """Преобразование данных документа в схему"""
-        # Парсим дату
         date_str = document_data.get('date', '')
-        parsed_date = None
-        if date_str:
-            try:
-                # Пробуем разные форматы даты
-                for fmt in ['%d.%m.%Y', '%Y-%m-%d', '%d/%m/%Y']:
-                    try:
-                        parsed_date = datetime.strptime(date_str, fmt)
-                        break
-                    except ValueError:
-                        continue
-            except Exception as e:
-                logger.warning(f"Не удалось распарсить дату '{date_str}': {e}")
-                parsed_date = datetime.now()
+        if isinstance(date_str, datetime):
+            parsed_date = date_str
+        else:
+            parsed_date = DocumentProcessor.parse_date(str(date_str))
 
         return MailDocumentCreate(
             external_id=document_data.get('external_id', ''),
-            date=parsed_date or datetime.now(),
+            date=parsed_date,
             subject=document_data.get('subject', ''),
             sender_inn=document_data.get('sender_inn', ''),
             sender_name=document_data.get('sender_name', ''),
@@ -120,6 +95,8 @@ class FNSFilterService:
         days_back = days_back or settings.DOCUMENTS_PERIOD_DAYS
 
         try:
+            from app.services.sbis_client import SBISClient
+
             async with SBISClient() as client:
                 # Получаем документы от ФНС
                 fns_documents = await client.get_fns_documents(days_back)
@@ -154,13 +131,18 @@ class FNSFilterService:
         if not documents:
             return "Документы от ФНС не найдены"
 
-        table = "📋 Документы от ФНС:\n"
+        table = "Документы от ФНС:\n"
         table += "=" * 80 + "\n"
         table += f"{'Дата':<12} {'Тема':<30} {'ИНН отправителя':<15} {'Вложения':<10}\n"
         table += "-" * 80 + "\n"
 
         for doc in documents:
-            date = doc.get('date', 'Не указана')[:10]
+            date = doc.get('date', 'Не указана')
+            if isinstance(date, datetime):
+                date = date.strftime('%d.%m.%Y')
+            else:
+                date = str(date)[:10]
+
             title = doc.get('subject', 'Без названия')[:28]
             sender_inn = doc.get('sender_inn', 'Не указан')[:13]
             has_attachments = "Да" if doc.get('has_attachment', False) else "Нет"

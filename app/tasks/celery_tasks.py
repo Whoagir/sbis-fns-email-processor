@@ -16,6 +16,7 @@ from app.services.sbis_client import SBISClient
 from app.services.fns_filter import FNSFilter
 from app.utils.logger import get_logger
 from app.models.models import MailDocument, ProcessingLog
+from app.services.fns_filter import FNSFilterService
 
 logger = get_logger(__name__)
 
@@ -109,31 +110,39 @@ def check_fns_mails(self):
                     return None
                 return await sbis_client.get_fns_documents(days_back=settings.DOCUMENTS_PERIOD_DAYS)
 
+        async def get_all_docs():
+            async with SBISClient() as sbis_client:
+                if not await sbis_client.authenticate():
+                    logger.error("Не удалось авторизоваться в СБИС")
+                    return None
+
+                # Получаем сырые данные
+                raw_result = await sbis_client.get_documents_raw(days_back=settings.DOCUMENTS_PERIOD_DAYS)
+                if not raw_result:
+                    return []
+
+                # Парсим ВСЕ документы (не только от ФНС)
+                all_documents = sbis_client.parse_documents(raw_result)
+                return all_documents
+
         # Запускаем асинхронную функцию
-        fns_documents = asyncio.run(get_fns_docs())
+        # fns_documents = asyncio.run(get_fns_docs())
+        all_documents = asyncio.run(get_all_docs())
 
-        if fns_documents is None:
-            log_entry.status = "error"
-            log_entry.error_message = "Ошибка авторизации в СБИС"
-            db.commit()
-            return {"status": "error", "message": "Ошибка авторизации в СБИС"}
-
-        if not fns_documents:
-            logger.info("Документов от ФНС не найдено")
-            log_entry.status = "success"
-            log_entry.total_documents = 0
-            log_entry.fns_documents = 0
-            db.commit()
-            return {"status": "success", "message": "Документов от ФНС не найдено", "count": 0}
-
-        # Сохраняем новые документы в базу данных
         new_documents_count = 0
-        for doc in fns_documents:
+        fns_documents_count = 0
+
+        for doc in all_documents:
             existing_doc = db.query(MailDocument).filter(
                 MailDocument.external_id == doc.get('external_id', '')
             ).first()
 
             if not existing_doc:
+                # Определяем, от ФНС ли документ
+                is_fns = FNSFilterService.is_from_fns(doc)
+                if is_fns:
+                    fns_documents_count += 1
+
                 mail_doc = MailDocument(
                     external_id=doc.get('external_id', ''),
                     date=doc.get('date', datetime.now()),
@@ -142,27 +151,22 @@ def check_fns_mails(self):
                     sender_name=doc.get('sender_name', ''),
                     filename=doc.get('filename', ''),
                     has_attachment=doc.get('has_attachment', False),
-                    is_from_fns=True
+                    is_from_fns=is_fns  # Правильно устанавливаем флаг!
                 )
                 db.add(mail_doc)
                 new_documents_count += 1
 
         db.commit()
 
-        log_entry.status = "success"
-        log_entry.total_documents = len(fns_documents)
-        log_entry.fns_documents = len(fns_documents)
-        db.commit()
-
-        logger.info(f"Обработано {len(fns_documents)} документов от ФНС, новых: {new_documents_count}")
-
         return {
             "status": "success",
-            "message": f"Обработано {len(fns_documents)} документов от ФНС",
-            "total_count": len(fns_documents),
+            "message": f"Обработано {len(all_documents)} документов, {fns_documents_count} от ФНС",
+            "total_count": len(all_documents),
+            "fns_count": fns_documents_count,
             "new_count": new_documents_count,
             "task_id": task_id
         }
+
 
     except Exception as e:
         logger.error(f"Ошибка в задаче check_fns_mails: {str(e)}")
@@ -254,14 +258,14 @@ def get_fns_documents_manual(self, days: int = 7):
 # Добавь эту задачу в celery_tasks.py
 
 @celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 60})
-def check_all_documents_task(self, days_back: int = 3650):
+def check_all_documents_task(self, days_back: int = 3600):
     """
     Celery задача для полной проверки всех документов за указанный период
 
     Args:
-        days_back: Количество дней назад для проверки (по умолчанию 10 лет)
+        days_back: Количество дней назад для проверки (по умолчанию 2 года)
     """
-    logger.info(f"🚀 Celery: Запуск полной проверки за {days_back} дней")
+    logger.info(f"Celery: Запуск полной проверки за {days_back} дней")
 
     db = None
     task_id = self.request.id
@@ -299,7 +303,7 @@ def check_all_documents_task(self, days_back: int = 3650):
                     meta={'status': 'Получение документов из СБИС...', 'progress': 30}
                 )
 
-                return await sbis_client.get_fns_documents(days_back=days_back)
+                return await sbis_client.get_all_documents(days_back=days_back)
 
         # Запускаем асинхронную функцию
         fns_documents = asyncio.run(get_all_fns_docs())
@@ -336,6 +340,8 @@ def check_all_documents_task(self, days_back: int = 3650):
                 MailDocument.external_id == doc.get('external_id', '')
             ).first()
 
+            is_fns = FNSFilterService.is_from_fns(doc)
+
             if not existing_doc:
                 mail_doc = MailDocument(
                     external_id=doc.get('external_id', ''),
@@ -345,7 +351,7 @@ def check_all_documents_task(self, days_back: int = 3650):
                     sender_name=doc.get('sender_name', ''),
                     filename=doc.get('filename', ''),
                     has_attachment=doc.get('has_attachment', False),
-                    is_from_fns=True
+                    is_from_fns=is_fns
                 )
                 db.add(mail_doc)
                 new_documents_count += 1
@@ -372,7 +378,7 @@ def check_all_documents_task(self, days_back: int = 3650):
         )
 
         logger.info(
-            f"✅ Celery: Полная проверка завершена. Обработано {len(fns_documents)} документов, новых: {new_documents_count}")
+            f"Celery: Полная проверка завершена. Обработано {len(fns_documents)} документов, новых: {new_documents_count}")
 
         return {
             "status": "success",
@@ -384,7 +390,7 @@ def check_all_documents_task(self, days_back: int = 3650):
         }
 
     except Exception as e:
-        logger.error(f"❌ Celery: Ошибка полной проверки: {str(e)}")
+        logger.error(f"Celery: Ошибка полной проверки: {str(e)}")
 
         if db:
             db.rollback()

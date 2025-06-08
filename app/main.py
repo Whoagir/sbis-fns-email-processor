@@ -4,6 +4,7 @@ from app.database import engine
 from app.models import models
 from fastapi.staticfiles import StaticFiles
 from app.utils.logger import logger
+from app.tasks.celery_tasks import check_all_documents_task
 import os
 
 # Создаем папку для логов если её нет
@@ -54,6 +55,14 @@ async def health():
     """Проверка состояния сервиса"""
     return {"status": "healthy"}
 
+@app.on_event("startup")
+async def startup_event():
+    """Выполняется при старте приложения"""
+    # Запускаем полную проверку один раз
+    if not hasattr(app.state, "startup_completed"):
+        app.state.startup_completed = True
+        task = check_all_documents_task.delay(3600)
+        logger.info(f"Запущена полная проверка документов, Task ID: {task.id}")
 
 if __name__ == "__main__":
     import uvicorn
