@@ -167,7 +167,7 @@ async def check_all_documents(db: Session = Depends(get_db)):
     - Возвращает подробную статистику
     """
     try:
-        logger.info("🚀 Запуск полной проверки документов за 10 лет")
+        logger.info("Запуск полной проверки документов за 10 лет")
         start_time = datetime.now()
 
         days_back = 3650
@@ -206,7 +206,7 @@ async def check_all_documents(db: Session = Depends(get_db)):
         }
 
     except Exception as e:
-        logger.error(f"❌ Ошибка полной проверки документов: {str(e)}")
+        logger.error(f"Ошибка полной проверки документов: {str(e)}")
         return {
             "status": "error",
             "message": "Ошибка при выполнении полной проверки",
@@ -218,7 +218,7 @@ async def check_all_documents(db: Session = Depends(get_db)):
 async def run_full_check(db: Session, days_back: int):
     """Выполнение полной проверки документов за указанный период"""
     try:
-        logger.info(f"🔍 Начинаем полную проверку за {days_back} дней")
+        logger.info(f"Начинаем полную проверку за {days_back} дней")
 
         result = await fns_service.get_and_process_fns_documents(db, days_back)
 
@@ -402,7 +402,7 @@ async def generate_json_report(
             filename=filename
         )
 
-        logger.info(f"📊 Сгенерирован JSON отчет: {len(documents)} документов")
+        logger.info(f"Сгенерирован JSON отчет: {len(documents)} документов")
 
         return {
             "status": "success",
@@ -417,7 +417,7 @@ async def generate_json_report(
         }
 
     except Exception as e:
-        logger.error(f"❌ Ошибка генерации JSON отчета: {e}")
+        logger.error(f"Ошибка генерации JSON отчета: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка генерации отчета: {str(e)}")
 
 
@@ -435,7 +435,7 @@ async def get_reports_list():
         }
 
     except Exception as e:
-        logger.error(f"❌ Ошибка получения списка отчетов: {e}")
+        logger.error(f"Ошибка получения списка отчетов: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка получения отчетов: {str(e)}")
 
 
@@ -460,7 +460,7 @@ async def download_report(filename: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Ошибка скачивания отчета: {e}")
+        logger.error(f"Ошибка скачивания отчета: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка скачивания: {str(e)}")
 
 
@@ -533,5 +533,5 @@ async def dashboard_api(db: Session = Depends(get_db)):
         }
 
     except Exception as e:
-        logger.error(f"❌ Ошибка API дашборда: {e}")
+        logger.error(f"Ошибка API дашборда: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка дашборда: {str(e)}")

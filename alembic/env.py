@@ -6,7 +6,7 @@ from alembic import context
 import os
 import sys
 
-# Добавляем путь к приложению
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from app.database import Base
